@@ -128,7 +128,6 @@ scp="scp $sshopts"
 : ${install_chef_suse_override:=./install-chef-suse.sh}
 : ${cct_tests:="features:base"}
 : ${want_mtu_size:=1500}
-: ${destarchs:=aarch64 x86_64 s390x}
 
 emulator=/usr/bin/qemu-system-$arch
 if [ -x /usr/bin/qemu-kvm ] && file /usr/bin/qemu-kvm | grep -q ELF; then
