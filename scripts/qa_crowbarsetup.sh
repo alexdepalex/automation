@@ -25,6 +25,7 @@ fi
 : ${cinder_netapp_login:=openstack}
 : ${cinder_netapp_password:=''}
 : ${clouddata:=$(dig -t A +short clouddata.nue.suse.com)}
+: ${clouddata_base_path:="/repos"}
 : ${distsuse:=dist.nue.suse.com}
 distsuseip=$(dig -t A +short $distsuse)
 : ${susedownload:=download.nue.suse.com}
@@ -37,8 +38,9 @@ distsuseip=$(dig -t A +short $distsuse)
 : ${want_murano:=0}
 : ${want_s390:=''}
 : ${want_horizon_integration_test:=''}
-
+: ${repo_method:=nfs}
 : ${arch:=$(uname -m)}
+: ${crowbar_install_timeout:=180}
 
 if [[ $arch = "s390x" ]] ; then
     want_s390=1
@@ -448,6 +450,32 @@ function add_mount
     fi
 }
 
+function copy_smt_repo
+{
+    local smt_repo="$1"
+    local smt_target_dir="$2"
+    local zypper_alias="$3"
+    
+    smt_index_file="/tmp/smt_index.txt.$$"
+
+    wget "${susedownload}${susedownload_base_path}/index.txt" -O $smt_index_file
+    if [[ $? -ne 0 ]]; then
+        complain 99 "Unable to fetch index from SMT mirror - giving up"
+    fi
+
+    smt_repo_url=$(grep "^${smt_repo}," "$smt_index_file" | awk -F, '{print $3}')
+    if [[ -z $smt_repo_url ]]; then
+        complain 99 "Repo $smt_repo doesn't exist - giving up"
+    fi
+    wget -P "$smt_target_dir" -nd --progress=dot:mega -r -np -nc -nv -A rpm,drpm "${susedownload}${susedownload_base_path}/$smt_repo_url/"
+
+    if [ -n "${zypper_alias}" ]; then
+        zypper rr "${zypper_alias}"
+        safely zypper -n ar -f "${targetdir}" "${zypper_alias}"
+        safely zypper -n ar -f "$smt_target_dir" "$smt_repo_alias"
+    fi
+}
+
 function getcloudver
 {
     if   [[ $cloudsource =~ ^.*(cloud|GM)3(\+up)?$ ]] ; then
@@ -655,7 +683,11 @@ function addcloud5pool
 
 function addcloud6maintupdates
 {
-    add_mount "SUSE-OpenStack-Cloud-6-Updates" $clouddata':/srv/nfs/repos/SUSE-OpenStack-Cloud-6-Updates/' "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Updates/" "cloudmaintup"
+    if [[ $repo_method == "nfs" ]]; then
+        add_mount "SUSE-OpenStack-Cloud-6-Updates" $clouddata':/srv/nfs/repos/SUSE-OpenStack-Cloud-6-Updates/' "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Updates/" "cloudmaintup"
+    else
+        copy_smt_repo "SUSE-OpenStack-Cloud-6-Updates" "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Updates/" "cloudmaintup"
+    fi
 }
 
 function addcloud6testupdates
@@ -667,7 +699,11 @@ function addcloud6testupdates
 
 function addcloud6pool
 {
-    add_mount "SUSE-OpenStack-Cloud-6-Pool" $clouddata':/srv/nfs/repos/SUSE-OpenStack-Cloud-6-Pool/' "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Pool/" "cloudpool"
+    if [[ $repo_method == "nfs" ]]; then
+        add_mount "SUSE-OpenStack-Cloud-6-Pool" $clouddata':/srv/nfs/repos/SUSE-OpenStack-Cloud-6-Pool/' "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Pool/" "cloudpool"
+    else
+        copy_smt_repo "SUSE-OpenStack-Cloud-6-Pool" "$tftpboot_repos12sp1_dir/SUSE-OpenStack-Cloud-6-Pool/" "cloudpool"
+    fi
 }
 
 function addcctdepsrepo
@@ -1059,14 +1095,19 @@ function onadmin_prepare_sles12_installmedia
     fi
 }
 
-function onadmin_prepare_sles12sp1_installmedia
+function onadmin_prepare_sles12sp1_installmedia()
 {
     local a
     for a in $architectures; do
         local sles12sp1_mount="$tftpboot_suse12sp1_dir/$a/install"
-        add_mount "SLE-12-SP1-Server-LATEST/sle-12-$a" \
-            "$clouddata:/srv/nfs/suse-12.1/$a/install" \
+
+        if [[ $fetch_method == "nfs" ]]; then
+            add_mount "SLE-12-SP1-Server-LATEST/sle-12-$a" \
+           "$clouddata:/srv/nfs/suse-12.1/$a/install" \
             "$sles12sp1_mount"
+        else
+            rsync_iso "/repo/ISO" "SLE-12-SP1-Server-DVD-${a}-GM-DVD1.iso" $sles12sp1_mount
+        fi
 
         if [ ! -d "$sles12sp1_mount/media.1" ] ; then
             complain 34 "We do not have SLES12 SP1 install media - giving up"
@@ -1097,16 +1138,23 @@ function onadmin_prepare_sles12_other_repos
     done
 }
 
-function onadmin_prepare_sles12sp1_other_repos
+function onadmin_prepare_sles12sp1_other_repos()
 {
-    for repo in SLES12-SP1-{Pool,Updates}; do
-        add_mount "$repo/sle-12-$arch" "$clouddata:/srv/nfs/repos/$arch/$repo" \
-            "$tftpboot_repos12sp1_dir/$repo"
-        if [[ $want_s390 ]] ; then
-            add_mount "$repo/sle-12-s390x" "$clouddata:/srv/nfs/repos/s390x/$repo" \
-                "$tftpboot_suse12sp1_dir/s390x/repos/$repo"
-        fi
-    done
+
+    if [[ $repo_method == "nfs" ]]; then
+        for repo in SLES12-SP1-{Pool,Updates}; do
+            add_mount "$repo/sle-12-$arch" "$clouddata:/srv/nfs/repos/$arch/$repo" \
+                "$tftpboot_repos12sp1_dir/$repo"
+            if [[ $want_s390 ]] ; then
+                add_mount "$repo/sle-12-s390x" "$clouddata:/srv/nfs/repos/s390x/$repo" \
+                    "$tftpboot_suse12sp1_dir/s390x/repos/$repo"
+            fi
+        done
+    else
+        for smt_repo in SLES12-SP1-{Pool,Updates}; do
+            copy_smt_repo "$smt_repo" "$tftpboot_repos12sp1_dir/$smt_repo/"
+        done
+    fi
 }
 
 function onadmin_prepare_sles12sp2_other_repos
@@ -1436,7 +1484,7 @@ function onadmin_set_source_variables
         GM6|GM6+up)
             cs=$cloudsource
             [[ $cs =~ GM6 ]] && cs=GM
-            CLOUDSLE12DISTPATH=/install/SLE-12-SP1-Cloud6-$cs/
+            CLOUDSLE12DISTPATH=${cloud_sle12_dist_path:=/install/SLE-12-SP1-Cloud6-$cs/}
             CLOUDSLE12DISTISO="SUSE-OPENSTACK-CLOUD-6-$arch*1.iso"
             CLOUDLOCALREPOS="SUSE-OpenStack-Cloud-6-official"
         ;;
@@ -1498,6 +1546,23 @@ function onadmin_repocleanup
     zypper mr -d sp3sdk
 }
 
+function onadmin_convert_product_to_path
+{
+    smt_repo="$1"
+
+    wget -A /tmp/index.txt "${susedownload}${susedownload_base_path}/index.txt" -O smt_index.txt.$$
+    if [[ $? -ne 0 ]]; then
+        complain 99 "Unable to fetch index from SMT mirror - giving up"
+    fi
+
+    smt_repo_url=$(grep "^${smt_repo}," smt_index.txt.$$ | awk -F, '{print $3}')
+    if [[ -z $smt_repo_url ]]; then
+        complain 99 "Repo $smt_repo doesn't exist - giving up"
+    fi
+
+    echo "$smt_repo_url"
+}
+
 # replace zypper repos from the image with user-specified ones
 # because clouddata might not be reachable from where this runs
 function onadmin_setup_local_zypper_repositories
@@ -1507,7 +1572,8 @@ function onadmin_setup_local_zypper_repositories
     zypper lr -e - | sed -n '/^name=/ {s///; /ptf/! p}' | \
         xargs -r zypper rr
 
-    uri_base="http://${clouddata}/repos"
+    #uri_base="http://${clouddata}${clouddata_base_path}"
+    uri_base="http://${clouddata}${clouddata_base_path}"
     # restore needed repos depending on localreposdir_target
     if [ -n "${localreposdir_target}" ]; then
         mount_localreposdir_target
@@ -1519,8 +1585,13 @@ function onadmin_setup_local_zypper_repositories
             zypper ar $uri_base/SLES11-SP3-Updates/ sles11sp3up
         ;;
         6)
-            zypper ar $uri_base/SLES12-SP1-Pool/ sles12sp1
-            zypper ar $uri_base/SLES12-SP1-Updates/ sles12sp1up
+            if [[ $fetch_method == "nfs" ]]; then
+                zypper ar $uri_base/SLES12-SP1-Pool/ sles12sp1
+                zypper ar $uri_base/SLES12-SP1-Updates/ sles12sp1up
+            else
+                zypper ar $uri_base/$(onadmin_convert_product_to_path SLES12-SP1-Pool)/ sles12sp1
+                zypper ar $uri_base/$(onadmin_convert_product_to_path SLES12-SP1-Updates)/ sles12sp1up
+            fi
         ;;
         7)
             if [ "$want_sles12sp1_admin" == 1 ]; then
@@ -1820,7 +1891,8 @@ function do_installcrowbar_cloud6plus
     safely crowbar_api_request POST $crowbar_api $crowbar_api_installer_path/start.json
 
     wait_for 9 2 "crowbar_install_status | grep -q '\"installing\": *true'" "crowbar to start installing" "tail -n 500 $crowbar_install_log ; complain 88 'crowbar did not start to install'"
-    wait_for 180 10 "crowbar_install_status | grep -q '\"installing\": *false'" "crowbar to finish installing" "tail -n 500 $crowbar_install_log ; complain 89 'crowbar installation failed'"
+    # Wait 2 hours instead of 30 minutes
+    wait_for $crowbar_install_timeout 10 "crowbar_install_status | grep -q '\"installing\": *false'" "crowbar to finish installing" "tail -n 500 $crowbar_install_log ; complain 89 'crowbar installation failed'"
     if ! crowbar_install_status | grep -q '\"success\": *true' ; then
         tail -n 500 $crowbar_install_log
         crowbar_install_status

@@ -298,8 +298,18 @@ function libvirt_do_onhost_deploy_image()
 
     [[ $clouddata ]] || complain 108 "clouddata IP not set - is DNS broken?"
     pushd /tmp
-    safely wget --progress=dot:mega -N \
-        http://$clouddata/images/$arch/$image
+
+    # If use_cached_image is set and image resides in /tmp, use the image
+    # instead of redownloading it.
+    if [[ $use_cached_images = 1 ]]; then
+        if [[ ! -e $image ]]; then
+            safely wget --progress=dot:mega -N \
+                http://$clouddata/images/$arch/$image
+        fi
+    else
+        safely wget --progress=dot:mega -N \
+            http://$clouddata/images/$arch/$image
+    fi
 
     echo "Cloning $role node vdisk from $image ..."
     safely qemu-img convert -t none -O raw -S 0 -p $image $disk
@@ -312,6 +322,16 @@ function libvirt_do_onhost_deploy_image()
         local part2=$(kpartx -asv $disk|perl -ne 'm/add map (\S+2) / && print $1')
         test -n "$part2" || complain 31 "failed to find partition #2"
         local bdev=/dev/mapper/$part2
+        safely fsck -y -f $bdev
+        safely resize2fs $bdev
+        time udevadm settle
+        sleep 1 # time for dev to become unused
+        safely kpartx -dsv $disk
+    else
+        echo -e "d\nn\np\n1\n\n\na\nw" | fdisk $disk
+        local part1=$(kpartx -asv $disk|perl -ne 'm/add map (\S+1) / && print $1')
+        test -n "$part1" || complain 31 "failed to find partition #1"
+        local bdev=/dev/mapper/$part1
         safely fsck -y -f $bdev
         safely resize2fs $bdev
         time udevadm settle

@@ -89,8 +89,13 @@ needcvol=1
 [[ "$libvirt_type" = "hyperv" && $compute_node_memory -lt $hyperv_node_memory ]] && compute_node_memory=$hyperv_node_memory
 : ${xen_node_memory:=4000000}
 [[ "$libvirt_type" = "xen" && $compute_node_memory -lt $xen_node_memory ]] && compute_node_memory=$xen_node_memory
+: ${repo_method:=nfs}
 # hdd size defaults (unless defined otherwise)
-: ${adminnode_hdd_size:=15}
+if [[ "$repo_method" = "smt" ]]; then
+    : ${adminnode_hdd_size:=60}
+else
+    : ${adminnode_hdd_size:=15}
+fi
 : ${controller_hdd_size:=20}
 : ${computenode_hdd_size:=20}
 : ${cephvolume_hdd_size:=21}
@@ -123,6 +128,7 @@ scp="scp $sshopts"
 : ${install_chef_suse_override:=./install-chef-suse.sh}
 : ${cct_tests:="features:base"}
 : ${want_mtu_size:=1500}
+: ${destarchs:=aarch64 x86_64 s390x}
 
 emulator=/usr/bin/qemu-system-$arch
 if [ -x /usr/bin/qemu-kvm ] && file /usr/bin/qemu-kvm | grep -q ELF; then
@@ -207,8 +213,10 @@ function sshrun
         export cloud=$virtualcloud ;
         # hostname of NFS server with repos and images:
         export clouddata=$clouddata ;
+        export clouddata_base_path=$clouddata_base_path ;
         export distsuse=$distsuse ;
         export susedownload=$susedownload ;
+        export susedownload_base_path=$susedownload_base_path ;
         export cloudfqdn=$cloudfqdn ;
         export cloudsource=$cloudsource ;
         export mkclouddriver=$mkclouddriver ;
@@ -231,9 +239,18 @@ function sshrun
         export scenario=$scenario ;
         export host_mtu=$host_mtu ;
 
+        export repo_method=$repo_method ;
+
+        export cloud_sle12_dist_path=$cloud_sle12_dist_path ;
+        
+        export architectures=$architectures ;
+
         export nova_shared_instance_storage=$nova_shared_instance_storage ;
+        export use_cached_images=$use_cached_images ;
 
         export localreposdir_target=$localreposdir_target ;
+
+        export crowbar_install_timeout=$crowbar_install_timeout ;
 
         export cinder_backend=$cinder_backend;
         export cinder_netapp_storage_protocol=$cinder_netapp_storage_protocol;
@@ -252,6 +269,8 @@ EOF
     env|grep -e ^debug_ -e ^pre_ -e ^vlan_ -e ^want_ -e ^net_ -e ^nodenumber -e ^clusterconfig | sort >> $mkcconf
 
     $scp $qa_crowbarsetup $mkcconf $iscsictl root@$adminip:
+    $scp /etc/sysconfig/clock root@$adminip:/etc/sysconfig/clock
+
     [[ $need_scenario = 1 ]] && $scp $scenario_path root@$adminip:
     ssh $sshopts root@$adminip "echo `hostname` > cloud ; . qa_crowbarsetup.sh ; $@"
     return $?
